@@ -1,0 +1,182 @@
+void IsrTim1(void)
+{	
+	LED1_GPIO_Port->BSRR = LED1_Pin;
+	float fTmp1,fTmp2,fTmp3,fTmp4;	
+	Tim1Ad();
+  //按键控制电压保护
+	if(UrmsRef>=32.0f)
+		{UrmsRef=32.0f;}
+	if(UrmsRef<=2.0f)
+		{UrmsRef=3.0f;}
+	
+	//软启动宏开关
+	//#define SOFT_START
+
+	//一阶低通频波参数
+	#define uFcut (2000.0f)		//电压滤波器截止频率
+	#define iFcut (15000.0f)	//电流滤波器截止频率
+	#define mFcut (20.0f)			//调制比滤波截止频率
+	#define ADFcut (500.0f)		//AD滤波器截止频率
+	#define AD1Fcut (300.0f)	//AD滤波器截止频率
+	#define UdcFcut (1.0f)		//AD滤波器截止频率
+	#define UacFcut (500.0f)		//AD滤波器截止频率
+	const float alphaU= 1.0f/(1.0f+2.0f*PI*uFcut*Ts); //滤波器系数
+	const float alphaI= 1.0f/(1.0f+2.0f*PI*iFcut*Ts); //滤波器系数	
+	const float alphaM= 1.0f/(1.0f+2.0f*PI*mFcut*Ts); //调制比滤波器系数	
+	const float alphaAD= 1.0f/(1.0f+2.0f*PI*ADFcut*Ts); //滤波器系数 
+	const float alphaAD1= 1.0f/(1.0f+2.0f*PI*AD1Fcut*Ts); //滤波器
+	const float alphaUdc= 1.0f/(1.0f+2.0f*PI*UdcFcut*Ts); //滤波器
+	const float alphaUac= 1.0f/(1.0f+2.0f*PI*UacFcut*Ts); //滤波器
+	//AD计数值滤波锁相环
+	AD1= AD1*alphaAD + AdData[1]*(1.0f-alphaAD);
+	AD2= AD2*alphaAD + AdData[2]*(1.0f-alphaAD);
+	
+	//AD计数值滤波逆变闭环
+	AD3= AD3*alphaAD + AdData[3]*(1.0f-alphaAD);
+	AD4= AD4*alphaAD + AdData[4]*(1.0f-alphaAD);
+	
+	int uPIopen=0;           //达到母线标志位
+	const float doublePi = PI*2.0f;
+	const float phaseDelta = FSIN/FSW;
+	const float uGain = (3.3f/4096.0f)*(64.9f/3.0f);
+//	float modPercent = 0.5656f; //调制率 20sqrt(2)/50=0.5656
+	float uout=10.0f;        //开环输出电压有效值
+	float Udc=50.0f;         //输入电压
+	float modPercent = uout*sqrt(2)/Udc;      //开环调制率计算  
+	float UrPu=0.0f;
+	#define UBASE (100.0f)
+	#define UBASE_DIV (0.01f)
+
+	upid.Ref = UrmsRef*UBASE_DIV;//电压给定
+
+	
+	
+//逆变电压闭环
+  fTmp2 = (float)AD3 - (float)AD4;
+	fTmp2 = fTmp2*uGain;
+	fTmp4=fTmp4*alphaUac+fTmp2*(1.0f-alphaUac);
+	Uac=fTmp4;
+	epara2.voltage_in = fTmp2;
+	epara2.calc(&epara2);
+	
+	
+	//锁相环
+  fTmp1 = (float)AD1 - (float)AD2;
+	fTmp1 = fTmp1*uGain;
+	epara1.voltage_in = fTmp1;         //AD1和AD2相减后的值
+	epara1.calc(&epara1);
+//	sogi.Uin =epara1.voltage_in;
+  sogi.Uin =epara1.voltage_in;
+	sogi.calc(&sogi);
+	
+	//50Hz正弦 32kHz开关频率
+	//每个中断周期相位标么值增量
+	phasePu = phasePu + phaseDelta;		
+	
+	//限制在 [0,1);
+	if(phasePu>=1.0f){
+		phasePu = phasePu - 1.0f; 
+	}
+	else if(phasePu<0){
+		phasePu = phasePu + 1.0f;
+	}
+	//限制在[-2pi,0)
+	phase=doublePi*(phasePu-1.0f);
+	
+	
+		 	
+		 
+	
+
+//开启电压闭环的条件
+	if(sogi.Freq>49.9f&&sogi.Freq<50.1&&sogi.wt>-0.01f&&sogi.wt<0.01f&&epara2.rms_voltage>24.0f) 
+	{
+		uPIopen=1;
+	 }
+	else
+	{ uPIopen=0;
+	 }
+  upid.Close=1;
+	uPIopen=1;
+	if(upid.Close==1&&uPIopen)                  //闭环
+			{	
+				UrPu = (epara2.rms_voltage-0.0f)*UBASE_DIV;          //有效值*0.01=有效值/100基值
+				upid.Fdb = UrPu;
+				upid.calc(&upid); 
+				modGain=upid.Out;
+			} 
+	else                                //开环
+		{ 
+			modPercent=UrmsRef*1.4140f/50.0f;
+		//调制比滤波软启
+			modGain = modGain*alphaM + modPercent*(1.0f-alphaM);
+			modGain = modPercent;        //开环
+			if(modPercent>=0.9f)
+				{
+					modPercent=0.9f;
+				}
+			else if(modPercent<=0.0f)
+				{
+					modPercent=0.0f;
+				}
+		}
+	
+	
+//#endif
+//fTmp2= (sinf(phase))*modGain*(float)(CT_HALF)+(float)(CT_HALF);
+		fTmp2= (sogi.Sine)*modGain*(float)(CT_HALF)+(float)(CT_HALF);
+
+	if(fTmp2>=(float)(CT_MAX))
+		{
+			fTmp2=(float)(CT_MAX);		
+		}
+	else if(fTmp2<0)
+		{
+		fTmp2=0;
+	  }
+	CCR1_value = (uint16_t)(fTmp2);
+	//SPWM单相逆变
+	__HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_1, CCR1_value);
+	__HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_2, CT_MAX-CCR1_value);
+	
+
+	
+  LED1_GPIO_Port->BSRR = LED1_Pin<< 16U;
+}
+
+//AD信号处理
+void AdSignalProcess(void)
+{
+	float fTmp1,fTmp2;
+	//一阶低通频波参数
+	#define uFcut (2000.0f)		//滤波器截止频率
+	#define iFcut (15000.0f)		//滤波器截止频率
+	const float alphaU= 1.0f/(1.0f+2.0f*PI*uFcut*Ts); //滤波器系数
+	const float alphaI= 1.0f/(1.0f+2.0f*PI*iFcut*Ts); //滤波器系数	
+	#define IBASE (5.0f) //电流基值5A
+	#define UBASE (50.0f) //电压基值
+	const float iGain1= 1.5f*3.3f/4096.0f;
+	//const float iGain1= 1.5f*3.3f/4096.0f/0.2f/IBASE;	
+	const float iGain2= 1.0f/0.2f/IBASE;	
+	const float uGain=3.3f/4096.0f/3.0f;
+	const float iRef = 4.0f; //电流单环给定
+	const float iRefPu= iRef/IBASE;
+	const float iOffSet = 0.0f; //电流pu值偏移校正
+	const float uOffSet = 0.0f; //电压pu值偏移较正 
+	
+	#define I_AD				//电流AD宏开关
+	#define I_AD_FILTER //电流信号滤波宏开关
+	#define U_AD				//电压AD宏开关
+	#define U_AD_FILTER	//电压信号滤波宏开关
+	#define OVER_I_PROTECT //过流保护宏开关
+
+#ifdef I_AD		//电流AD宏开关开始
+	//电流传感器原始信号电压
+	fTmp1=(float)(AdData[0])*iGain1 - 2.5f;	
+
+	//转pu值及其偏移较正
+	fTmp1 = fTmp1*iGain2 - iOffSet;
+
+	#ifdef I_AD_FILTER
+		//电流滤波
+		iaPu = iaPu*alphaI + fTmp1*(1.0f-alphaI);
